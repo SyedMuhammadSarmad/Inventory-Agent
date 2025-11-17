@@ -1,18 +1,18 @@
 import os
+import asyncio
+import json
 from datetime import datetime
 from typing import List
-from agents import Agent, ItemHelpers, function_tool,Runner,set_default_openai_client,set_tracing_export_api_key,set_default_openai_api
+from agents import Agent, ItemHelpers, function_tool,Runner,set_default_openai_client,set_tracing_export_api_key,set_default_openai_api,ModelSettings
 from openai import AsyncOpenAI
 from agents.extensions.handoff_prompt import RECOMMENDED_PROMPT_PREFIX
-from openai.types.responses import ResponseInputItemParam
 from fastapi import FastAPI, Depends
 from contextlib import asynccontextmanager
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from sqlmodel import Session, select
+from sqlmodel import Session
 from dotenv import load_dotenv
-import openai
-
+from fastapi.responses import StreamingResponse
 from schema import (
     InventoryItem,
     Reorder,
@@ -118,7 +118,7 @@ def create_reorder_tool(data: CreateReorderInput) -> dict:
         return {"message": "Reorder created", "reorder": reorder}
 
 
-@function_tool
+
 def approve_reorder_tool(data: ApproveReorderInput):
     """Approve or reject a reorder."""
     from schema import engine
@@ -142,7 +142,7 @@ def approve_reorder_tool(data: ApproveReorderInput):
         return {"message": f"Reorder {reorder.status}"}
 
 
-@function_tool
+
 def create_payment_tool(data: CreatePaymentInput):
     """Create payment for an approved reorder."""
     from schema import engine
@@ -174,22 +174,42 @@ def create_payment_tool(data: CreatePaymentInput):
         session.commit()
 
         return {"message": "Payment successful", "payment": payment}
+    
+@function_tool
+def approve_and_pay_reorder(data: ApproveReorderInput):
+    approve_result = approve_reorder_tool(data)
+    if "error" in approve_result:
+        return approve_result
+    
+    # Automatically create payment
+    payment_result = create_payment_tool(CreatePaymentInput(reorder_id=data.reorder_id))
+    
+    return {
+        "approve_result": approve_result,
+        "payment_result": payment_result
+    }
 
 class FinanceOutput(BaseModel):
     approved: List[int]
     paid: List[int]
     total_spent: float
     summary: str
+
+    
 finance_agent = Agent(
     name="finance agent",
     instructions=
 f"""{RECOMMENDED_PROMPT_PREFIX}
 You are the Finance Agent.
-you can approve reorders and create payments
+You receive workflow tasks from the manager agent.
+Rules:
+1. If given a reorder that needs approval, **always call `approve_reorder_tool`**.
+2. If given an approved reorder that requires payment, **always call `create_payment_tool`**.
+3. Do not perform any action without using the tools.
+4. Return only the tool's output.
 """
 ,
-    tools=[approve_reorder_tool,
-           create_payment_tool,
+    tools=[approve_and_pay_reorder
         ], 
     
     handoff_description="Finance agent which handle finance queries like approve reorder or create payments",
@@ -223,48 +243,117 @@ You are the Inventory Agent.You can check low stock items and create re-order re
 
 manager_agent = Agent(name="Manager agent",
     instructions=f"""{RECOMMENDED_PROMPT_PREFIX}
-You are a manager agent you always use the proper tools for according query
+You are the Manager Agent.
+You receive events from the workflow, such as inventory placing a reorder.
+Your responsibilities:
+1. If the event indicates a reorder was placed, immediately call the `finance_tool` to handle it.
+   - If the reorder needs approval, call `approve_reorder_tool`.
+   - If the reorder is approved and ready for payment, call `create_payment_tool`.
+2. Always use the tools; never skip or attempt to answer yourself.
+3. After calling the tool, return its output.
+4. Do not wait for any user query; act based on the workflow event.
+
+Always use the inventory tool first then called the finance tool 
+
+
 """,
     tools=[
-        finance_agent.as_tool(
-            tool_name="finance_tool",
-            tool_description="do the finance work"
-        ),
         inventory_agent.as_tool(
             tool_name="inventory_tool",
             tool_description="do inventory management work"
-        )],
-    model='gpt-4o')
+        ),
+        finance_agent.as_tool(
+            tool_name="finance_tool",
+            tool_description="do the finance work"
+        ),]
+        ,
+    model='gpt-4o',
+    model_settings=ModelSettings(parallel_tool_calls=False)
+    )
 
-@app.post("/agent/chat")
-async def main(req: message, session: Session = Depends(get_session)):
+@app.get("/agent/chat/stream")
+async def stream_agent(msg: str, session: Session = Depends(get_session)):
+    async def event_generator():
+        result = Runner.run_streamed(manager_agent, msg)
+        
+        async for event in result.stream_events():
+            output = None
+            
+            if event.type == "raw_response_event":
+                continue            
+            elif event.type == "agent_updated_stream_event":
+                output = {
+                    "type": "agent_updated",
+                    "new_agent": event.new_agent.name
+                }
+            
+            elif event.type == "run_item_stream_event":
+                if event.item.type == "tool_call_item":
+                    output = {
+                        "type": "tool_call",
+                        "input": event.item.to_input_item()["name"]
+                    }
+                elif event.item.type == "tool_call_output_item":
+                    # Convert string to dict if needed
+                    if isinstance(event.item.output, str):
+                        try:
+                            output_data = json.loads(event.item.output)
+                        except json.JSONDecodeError:
+                            output_data = event.item.output
+                    else:
+                        output_data = event.item.output
 
-    result = Runner.run_streamed(manager_agent, req.msg,)
-    print("=== Run starting ===")
+                    output = {
+                        "type": "tool_output",
+                        "output": output_data
+                    }
+                elif event.item.type == "message_output_item":
+                    output = {
+                        "type": "message_output",
+                        "message": ItemHelpers.text_message_output(event.item)
+                    }
+            
+            if output:
+                # SSE format: 'data: <json>\n\n'
+                yield f"data: {json.dumps(output)}\n\n"
+            
+            await asyncio.sleep(0.01)  # prevent blocking
+    
+        # Send final output
+        yield f"data: {json.dumps({'type': 'final_output', 'output': result.final_output})}\n\n"
 
-    async for event in result.stream_events():
-        # We'll ignore the raw responses event deltas
-        if event.type == "raw_response_event":
-            continue
-        # When the agent updates, print that
-        elif event.type == "agent_updated_stream_event":
-            print(f"Agent updated: {event.new_agent.name}")
-            continue
-        # When items are generated, print them
-        elif event.type == "run_item_stream_event":
-            if event.item.type == "tool_call_item":
-                print("-- Tool was called")
-                tool_input = event.item.to_input_item()
-                print(f"Tool name: {tool_input}")
-            elif event.item.type == "tool_call_output_item":
-                print(f"-- Tool output: {event.item.output}")
-            elif event.item.type == "message_output_item":
-                print(f"-- Message output:\n {ItemHelpers.text_message_output(event.item)}")
-            else:
-                pass  # Ignore other event types
+    return StreamingResponse(event_generator(), media_type="text/event-stream")
+# @app.post("/agent/chat")
+# async def main(req: message, session: Session = Depends(get_session)):
 
-    print("=== Run complete ===")
-    return result.final_output
+#     result = Runner.run_streamed(manager_agent, req.msg,)
+#     print("=== Run starting ===")
+
+#     async for event in result.stream_events():
+#         # We'll ignore the raw responses event deltas
+#         if event.type == "raw_response_event":
+#             continue
+#         # When the agent updates, print that
+#         elif event.type == "agent_updated_stream_event":
+#             print(f"Agent updated: {event.new_agent.name}")
+#             continue
+#         # When items are generated, print them
+#         elif event.type == "run_item_stream_event":
+#             if event.item.type == "tool_call_item":
+#                 print("-- Tool was called")
+#                 tool_input = event.item.to_input_item()
+#                 print(f"Tool name: {tool_input}")
+#             elif event.item.type == "tool_call_output_item":
+#                 print(f"-- Tool output: {event.item.output}")
+#             elif event.item.type == "message_output_item":
+#                 print(f"-- Message output:\n {ItemHelpers.text_message_output(event.item)}")
+#             else:
+#                 pass  # Ignore other event types
+
+#     print("=== Run complete ===")
+#     return result.final_output
+
+
 
 
 
