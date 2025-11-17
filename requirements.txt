@@ -1,7 +1,0 @@
-fastapi
-uvicorn[standard]
-sqlmodel
-openai
-python-dotenv
-httpx
-pydantic
