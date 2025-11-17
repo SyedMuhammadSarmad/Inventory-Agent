@@ -10,7 +10,7 @@ from fastapi import FastAPI, Depends
 from contextlib import asynccontextmanager
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from sqlmodel import Session
+from sqlmodel import Session, select
 from dotenv import load_dotenv
 from fastapi.responses import StreamingResponse
 from schema import (
@@ -270,6 +270,29 @@ Always use the inventory tool first then called the finance tool
     model='gpt-4o',
     model_settings=ModelSettings(parallel_tool_calls=False)
     )
+
+@app.get("/inventory", response_model=List[InventoryItem])
+def get_inventory(session: Session = Depends(get_session)):
+    items = session.exec(select(InventoryItem)).all()
+    return items
+
+# Endpoint to get all reorders
+@app.get("/reorders", response_model=List[Reorder])
+def get_reorders(session: Session = Depends(get_session)):
+    reorders = session.exec(select(Reorder)).all()
+    return reorders
+
+# Endpoint to get all payments
+@app.get("/payments", response_model=List[Payment])
+def get_payments(session: Session = Depends(get_session)):
+    payments = session.exec(select(Payment)).all()
+    return payments
+
+# Endpoint to get all budgets
+@app.get("/budgets", response_model=List[Budget])
+def get_budgets(session: Session = Depends(get_session)):
+    budgets = session.exec(select(Budget)).all()
+    return budgets
 
 @app.get("/agent/chat/stream")
 async def stream_agent(msg: str, session: Session = Depends(get_session)):
