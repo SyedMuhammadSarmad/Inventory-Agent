@@ -1,11 +1,10 @@
 import os
-import json
 from datetime import datetime
-from typing import List, Dict
-from agents import Agent, FunctionTool, RunContextWrapper, function_tool,Runner,set_default_openai_client,set_tracing_export_api_key,set_default_openai_api
+from typing import List
+from agents import Agent, ItemHelpers, function_tool,Runner,set_default_openai_client,set_tracing_export_api_key,set_default_openai_api
 from openai import AsyncOpenAI
 from agents.extensions.handoff_prompt import RECOMMENDED_PROMPT_PREFIX
-
+from openai.types.responses import ResponseInputItemParam
 from fastapi import FastAPI, Depends
 from contextlib import asynccontextmanager
 from fastapi.middleware.cors import CORSMiddleware
@@ -240,7 +239,31 @@ You are a manager agent you always use the proper tools for according query
 @app.post("/agent/chat")
 async def main(req: message, session: Session = Depends(get_session)):
 
-    result = await Runner.run(manager_agent, req.msg,)
+    result = Runner.run_streamed(manager_agent, req.msg,)
+    print("=== Run starting ===")
+
+    async for event in result.stream_events():
+        # We'll ignore the raw responses event deltas
+        if event.type == "raw_response_event":
+            continue
+        # When the agent updates, print that
+        elif event.type == "agent_updated_stream_event":
+            print(f"Agent updated: {event.new_agent.name}")
+            continue
+        # When items are generated, print them
+        elif event.type == "run_item_stream_event":
+            if event.item.type == "tool_call_item":
+                print("-- Tool was called")
+                tool_input = event.item.to_input_item()
+                print(f"Tool name: {tool_input}")
+            elif event.item.type == "tool_call_output_item":
+                print(f"-- Tool output: {event.item.output}")
+            elif event.item.type == "message_output_item":
+                print(f"-- Message output:\n {ItemHelpers.text_message_output(event.item)}")
+            else:
+                pass  # Ignore other event types
+
+    print("=== Run complete ===")
     return result.final_output
 
 
