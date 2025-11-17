@@ -138,7 +138,6 @@ def approve_reorder_tool(data: ApproveReorderInput):
         else:
             reorder.status = "rejected"
 
-        session.add(reorder)
         session.commit()
 
         return {"message": f"Reorder {reorder.status}"}
