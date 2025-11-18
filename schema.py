@@ -64,7 +64,7 @@ def seed_initial_data():
         item2 = InventoryItem(name="Black Jeans", sku="JEANS-031", quantity=20, reorder_level=5, price_per_unit=25.0)
         item3 = InventoryItem(name="Black shirt", sku="shirt-012", quantity=20, reorder_level=10, price_per_unit=27.0)
         item4 = InventoryItem(name="Black T-shirt", sku="JEANS-002", quantity=20, reorder_level=25, price_per_unit=35.0)
-        budget = Budget(category="general", allocated_amount=10000.0, spent_amount=250.0)
+        budget = Budget(category="general", allocated_amount=10000.0, spent_amount=0)
 
         session.add_all([item1, item2, item3, item4, budget])
         session.commit()
