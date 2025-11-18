@@ -44,7 +44,7 @@ class Budget(SQLModel, table=True):
     month: str = Field(default_factory=lambda: datetime.utcnow().strftime("%b-%Y"))
 
 
-DB_URL = "sqlite:///./hackathon_inventory (1)"
+DB_URL = "sqlite:///./hackathon_inventory1.db"
 engine = create_engine(DB_URL, echo=False)
 
 def create_db_and_tables():
